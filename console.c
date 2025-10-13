@@ -14,6 +14,7 @@
 #include "mmu.h"
 #include "proc.h"
 #include "x86.h"
+#include "kbd.h"
 
 static void consputc(int);
 
@@ -128,16 +129,35 @@ panic(char *s)
 #define CRTPORT 0x3d4
 static ushort *crt = (ushort*)P2V(0xb8000);  // CGA memory
 
+// NEW: Helper function to get hardware cursor position.
+static int
+cga_get_cursor_pos(void)
+{
+  int pos;
+  outb(CRTPORT, 14);
+  pos = inb(CRTPORT+1) << 8;
+  outb(CRTPORT, 15);
+  pos |= inb(CRTPORT+1);
+  return pos;
+}
+
+// NEW: Helper function to set hardware cursor position.
+static void
+cga_set_cursor_pos(int pos)
+{
+  outb(CRTPORT, 14);
+  outb(CRTPORT+1, pos >> 8);
+  outb(CRTPORT, 15);
+  outb(CRTPORT+1, pos);
+}
+
 static void
 cgaputc(int c)
 {
   int pos;
 
   // Cursor position: col + 80*row.
-  outb(CRTPORT, 14);
-  pos = inb(CRTPORT+1) << 8;
-  outb(CRTPORT, 15);
-  pos |= inb(CRTPORT+1);
+  pos = cga_get_cursor_pos();
 
   if(c == '\n')
     pos += 80 - pos%80;
@@ -155,11 +175,9 @@ cgaputc(int c)
     memset(crt+pos, 0, sizeof(crt[0])*(24*80 - pos));
   }
 
-  outb(CRTPORT, 14);
-  outb(CRTPORT+1, pos>>8);
-  outb(CRTPORT, 15);
-  outb(CRTPORT+1, pos);
-  crt[pos] = ' ' | 0x0700;
+  cga_set_cursor_pos(pos);
+  if(c == BACKSPACE) // Erase character at new cursor pos only for backspace.
+    crt[pos] = ' ' | 0x0700;
 }
 
 void
@@ -183,10 +201,17 @@ struct {
   char buf[INPUT_BUF];
   uint r;  // Read index
   uint w;  // Write index
-  uint e;  // Edit index
+  uint e;  // End of line index
+  uint c;  // NEW: Cursor index
 } input;
 
 #define C(x)  ((x)-'@')  // Control-x
+
+static int
+is_whitespace(char c)
+{
+  return c == ' ' || c == '\t' || c == '\n' || c == '\v';
+}
 
 void
 consoleintr(int (*getc)(void))
@@ -201,26 +226,86 @@ consoleintr(int (*getc)(void))
       doprocdump = 1;
       break;
     case C('U'):  // Kill line.
-      while(input.e != input.w &&
-            input.buf[(input.e-1) % INPUT_BUF] != '\n'){
+      while(input.e != input.w){
         input.e--;
         consputc(BACKSPACE);
       }
+      input.c = input.w;
       break;
     case C('H'): case '\x7f':  // Backspace
-      if(input.e != input.w){
+      if(input.c > input.w){
+        // Shift buffer left
+        for(int i = input.c; i < input.e; i++)
+          input.buf[(i-1) % INPUT_BUF] = input.buf[i % INPUT_BUF];
         input.e--;
-        consputc(BACKSPACE);
+        input.c--;
+        // Redraw line
+        cga_set_cursor_pos(cga_get_cursor_pos() - 1);
+        for(int i = input.c; i < input.e; i++)
+          consputc(input.buf[i % INPUT_BUF]);
+        consputc(' ');
+        cga_set_cursor_pos(cga_get_cursor_pos() - (input.e - input.c + 1));
       }
       break;
+    case KEY_LF: // Left arrow
+      if(input.c > input.w){
+        input.c--;
+        cga_set_cursor_pos(cga_get_cursor_pos() - 1);
+      }
+      break;
+    case KEY_RT: // Right arrow
+      if(input.c < input.e){
+        input.c++;
+        cga_set_cursor_pos(cga_get_cursor_pos() + 1);
+      }
+      break;
+    case C('D'):
+      if (input.e == input.w) { // Empty line, treat as EOF.
+        input.buf[input.e++ % INPUT_BUF] = C('D');
+        input.w = input.e;
+        input.c = input.w;
+        wakeup(&input.r);
+      } else if (input.c < input.e) { // Line has text, so move forward a word.
+        // MODIFICATION: Check for a next word before moving.
+        int temp_c = input.c;
+        // Skip current word's characters.
+        while (temp_c < input.e && !is_whitespace(input.buf[temp_c % INPUT_BUF]))
+          temp_c++;
+        // Skip whitespace characters.
+        while (temp_c < input.e && is_whitespace(input.buf[temp_c % INPUT_BUF]))
+          temp_c++;
+        
+        // Only move if we found the start of a new word before the end of the line.
+        if (temp_c < input.e) {
+          cga_set_cursor_pos(cga_get_cursor_pos() + (temp_c - input.c));
+          input.c = temp_c;
+        }
+      }
+      break;
+
     default:
-      if(c != 0 && input.e-input.r < INPUT_BUF){
-        c = (c == '\r') ? '\n' : c;
-        input.buf[input.e++ % INPUT_BUF] = c;
-        consputc(c);
-        if(c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF){
+      if(c != 0 && input.e < input.r + INPUT_BUF){
+        if(c == '\r')
+          c = '\n';
+
+        if(c == '\n' || c == C('D') || input.e == input.r + INPUT_BUF){ // Commit line
+          if(c == '\n')
+            cgaputc('\n');
+          input.buf[input.e++ % INPUT_BUF] = '\n';
           input.w = input.e;
+          input.c = input.w;
           wakeup(&input.r);
+        } else { // Insert character
+          for(int i = input.e; i > input.c; i--)
+            input.buf[i % INPUT_BUF] = input.buf[(i-1) % INPUT_BUF];
+          input.buf[input.c % INPUT_BUF] = c;
+          input.e++;
+          input.c++;
+          
+          for(int i = input.c - 1; i < input.e; i++)
+            consputc(input.buf[i % INPUT_BUF]);
+          
+          cga_set_cursor_pos(cga_get_cursor_pos() - (input.e - input.c));
         }
       }
       break;
@@ -228,7 +313,7 @@ consoleintr(int (*getc)(void))
   }
   release(&cons.lock);
   if(doprocdump) {
-    procdump();  // now call procdump() wo. cons.lock held
+    procdump();
   }
 }
 
@@ -293,6 +378,8 @@ consoleinit(void)
   devsw[CONSOLE].write = consolewrite;
   devsw[CONSOLE].read = consoleread;
   cons.locking = 1;
+
+  input.r = input.w = input.e = input.c = 0;
 
   ioapicenable(IRQ_KBD, 0);
 }
