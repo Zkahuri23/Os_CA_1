@@ -297,6 +297,8 @@ update_highlight(int start, int end, int on)
     }
 }
 
+// Delete the current selection and redraw the input line correctly.
+// Also record deletions into undo (best-effort, up to UNDO_BUF).
 static void
 delete_selection(void)
 {
@@ -325,22 +327,47 @@ delete_selection(void)
     }
 
     int len = e - s;
+    int old_e = input.e;
+    int old_c = input.c; // hardware cursor corresponds to this logical cursor
+
+    // Record deleted chars into undo (so Ctrl+Z can restore). This is optional.
+    for (int k = 0; k < len && undo.n < UNDO_BUF; k++)
+    {
+        undo.buf[undo.n].type = OP_DELETE;
+        undo.buf[undo.n].c = input.buf[(s + k) % INPUT_BUF];
+        undo.buf[undo.n].pos = s + k;
+        undo.n++;
+    }
+
+    // Compute screen start position for input.w based on the *old* cursor mapping.
+    // screen_pos_of_w = hw_cursor - (old_c - input.w)
+    int hw_cursor = cga_get_cursor_pos();
+    int screen_pos_of_w = hw_cursor - (old_c - (int)input.w);
+
+    // Safety clamp for screen_pos_of_w
+    if (screen_pos_of_w < 0)
+        screen_pos_of_w = 0;
+    if (screen_pos_of_w >= 25 * 80)
+        screen_pos_of_w = 25 * 80 - 1;
+
     // Shift buffer left to delete selected text
-    for (int i = e; i < (int)input.e; i++)
+    for (int i = e; i < old_e; i++)
         input.buf[(i - len) % INPUT_BUF] = input.buf[i % INPUT_BUF];
 
     input.e -= len;
     input.c = s;
 
     // Redraw the visible line from input.w .. input.e
-    int cursor_pos = cga_get_cursor_pos();
-    int screen_pos_of_w = cursor_pos - (int)(input.c - input.w);
     cga_set_cursor_pos(screen_pos_of_w);
     for (int i = input.w; i < input.e; i++)
         consputc(input.buf[i % INPUT_BUF]);
-    // clear leftover char at the end
-    consputc(' ');
-    // restore logical cursor to input.c
+
+    // Clear leftover characters that remain from old_e
+    int leftover = old_e - input.e;
+    for (int i = 0; i < leftover; i++)
+        consputc(' ');
+
+    // Restore logical cursor to input.c
     cga_set_cursor_pos(screen_pos_of_w + (input.c - input.w));
 
     clear_selection();
@@ -440,9 +467,13 @@ void consoleintr(int (*getc)(void))
             break;
 
         case C('V'): // Paste clipboard content
-            deselect_if_any();
+
             if (clipboard.n > 0)
             {
+                if (input.sel_start != -1 && input.sel_end != -1)
+                {
+                    delete_selection();
+                }
                 for (uint i = 0; i < clipboard.n; i++)
                 {
                     int ch = clipboard.buf[i];
@@ -475,6 +506,7 @@ void consoleintr(int (*getc)(void))
             }
 
             // After pasting, clear any selection
+            deselect_if_any();
             clear_selection();
             break;
 
