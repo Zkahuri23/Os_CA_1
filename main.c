@@ -51,14 +51,18 @@ mpenter(void)
 static void
 mpmain(void)
 {
-  cprintf("cpu%d: starting %d\n", cpuid(), cpuid());
-  cprintf("Group Members:\n");
-  cprintf("1. Zahra Kahuri\n");
-  cprintf("2. Fatima Borhani\n");
-  cprintf("3. Amir mohammad Barari\n");
-  idtinit();       // load idt register
-  xchg(&(mycpu()->started), 1); // tell startothers() we're up
-  scheduler();     // start running processes
+    cprintf("cpu%d: starting %d\n", cpuid(), cpuid());
+
+    cprintf("--------------------------------------\n");
+    cprintf("Group Members:\n");
+    cprintf("1. Amirmohammad Barari\n");
+    cprintf("2. Zahra Kahuri\n");
+    cprintf("3. Fatima Borhani\n");
+    cprintf("--------------------------------------\n");
+
+    idtinit();
+    xchg(&(mycpu()->started), 1);
+    scheduler();
 }
 
 pde_t entrypgdir[];  // For entry.S
