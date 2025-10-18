@@ -1,7 +1,3 @@
-// Console input and output.
-// Input is from the keyboard or serial port.
-// Output is written to the screen and serial port.
-
 #include "types.h"
 #include "defs.h"
 #include "param.h"
@@ -44,8 +40,6 @@ struct
     uint n;
 } undo;
 
-
-
 static void
 printint(int xx, int base, int sign)
 {
@@ -71,9 +65,7 @@ printint(int xx, int base, int sign)
     while (--i >= 0)
         consputc(buf[i]);
 }
-// PAGEBREAK: 50
 
-// Print to the console. only understands %d, %x, %p, %s.
 void cprintf(char *fmt, ...)
 {
     int i, c, locking;
@@ -117,7 +109,6 @@ void cprintf(char *fmt, ...)
             consputc('%');
             break;
         default:
-            // Print unknown % sequence to draw attention.
             consputc('%');
             consputc(c);
             break;
@@ -135,27 +126,23 @@ void panic(char *s)
 
     cli();
     cons.locking = 0;
-    // use lapiccpunum so that we can call panic from mycpu()
     cprintf("lapicid %d: panic: ", lapicid());
     cprintf(s);
     cprintf("\n");
     getcallerpcs(&s, pcs);
     for (i = 0; i < 10; i++)
         cprintf(" %p", pcs[i]);
-    panicked = 1; // freeze other CPU
+    panicked = 1;
     for (;;)
         ;
 }
 
-// PAGEBREAK: 50
 #define BACKSPACE 0x100
 #define CRTPORT 0x3d4
-static ushort *crt = (ushort *)P2V(0xb8000); // CGA memory
+static ushort *crt = (ushort *)P2V(0xb8000);
 
-// NEW: Forward declaration
 static void clear_selection(void);
 
-// NEW: Helper function to get hardware cursor position.
 static int
 cga_get_cursor_pos(void)
 {
@@ -167,7 +154,6 @@ cga_get_cursor_pos(void)
     return pos;
 }
 
-// NEW: Helper function to set hardware cursor position.
 static void
 cga_set_cursor_pos(int pos)
 {
@@ -182,7 +168,6 @@ cgaputc(int c)
 {
     int pos;
 
-    // Cursor position: col + 80*row.
     pos = cga_get_cursor_pos();
 
     if (c == '\n')
@@ -193,20 +178,20 @@ cgaputc(int c)
             --pos;
     }
     else
-        crt[pos++] = (c & 0xff) | 0x0700; // black on white
+        crt[pos++] = (c & 0xff) | 0x0700;
 
     if (pos < 0 || pos > 25 * 80)
         panic("pos under/overflow");
 
     if ((pos / 80) >= 24)
-    { // Scroll up.
+    {
         memmove(crt, crt + 80, sizeof(crt[0]) * 23 * 80);
         pos -= 80;
         memset(crt + pos, 0, sizeof(crt[0]) * (24 * 80 - pos));
     }
 
     cga_set_cursor_pos(pos);
-    if (c == BACKSPACE) // Erase character at new cursor pos only for backspace.
+    if (c == BACKSPACE)
         crt[pos] = ' ' | 0x0700;
 }
 
@@ -234,13 +219,13 @@ void consputc(int c)
 struct
 {
     char buf[INPUT_BUF];
-    uint r;        // Read index
-    uint w;        // Write index
-    uint e;        // End of line index
-    uint c;        // Cursor index
-    int selecting; // Is a selection process active (after first Ctrl+S)?
-    int sel_start; // Selection start index in buffer.
-    int sel_end;   // Selection end index in buffer.
+    uint r;
+    uint w;
+    uint e;
+    uint c;
+    int selecting;
+    int sel_start;
+    int sel_end;
 } input;
 
 #define CLIPBOARD_BUF 128
@@ -250,7 +235,125 @@ static struct
     uint n;
 } clipboard = {.n = 0};
 
-#define C(x) ((x) - '@') // Control-x
+static const char *commands[] = {
+    "cat", "echo", "find_sum", "forktest", "grep", "init",
+    "kill", "ln", "ls", "mkdir", "rm", "sh",
+    "stressfs", "usertests", "wc", "zombie", "console"};
+static int num_commands = sizeof(commands) / sizeof(commands[0]);
+
+static struct
+{
+    char last_prefix[INPUT_BUF];
+    int match_count;
+    const char *matches[sizeof(commands) / sizeof(commands[0])];
+    int match_index;
+    int active;
+} tab_state;
+
+#define C(x) ((x) - '@')
+
+static void
+reset_tab_state(void)
+{
+    tab_state.active = 0;
+    tab_state.match_index = 0;
+    tab_state.match_count = 0;
+    tab_state.last_prefix[0] = '\0';
+}
+
+static void
+handle_tab_completion(void)
+{
+    char prefix[INPUT_BUF];
+    int len = input.e - input.w;
+
+    int is_first_word = 1;
+    for (int i = input.w; i < input.e; i++)
+    {
+        if (input.buf[i % INPUT_BUF] == ' ')
+        {
+            is_first_word = 0;
+            break;
+        }
+    }
+    if (!is_first_word || len >= INPUT_BUF)
+    {
+        reset_tab_state();
+        return;
+    }
+
+    memmove(prefix, input.buf + (input.w % INPUT_BUF), len);
+    prefix[len] = '\0';
+
+    if (!tab_state.active || strncmp(prefix, tab_state.last_prefix, INPUT_BUF) != 0)
+    {
+        reset_tab_state();
+        safestrcpy(tab_state.last_prefix, prefix, INPUT_BUF);
+
+        for (int i = 0; i < num_commands; i++)
+        {
+            if (len == 0 || strncmp(prefix, commands[i], len) == 0)
+            {
+                tab_state.matches[tab_state.match_count++] = commands[i];
+            }
+        }
+
+        if (tab_state.match_count == 0)
+        {
+            reset_tab_state();
+            return;
+        }
+
+        if (tab_state.match_count == 1)
+        {
+            const char *completion = tab_state.matches[0];
+            int comp_len = strlen(completion);
+
+            while (input.e > input.w)
+            {
+                input.e--;
+                consputc(BACKSPACE);
+            }
+            input.c = input.w;
+
+            for (int i = 0; i < comp_len; i++)
+            {
+                input.buf[input.e++ % INPUT_BUF] = completion[i];
+                consputc(completion[i]);
+            }
+            input.c = input.e;
+            reset_tab_state();
+            return;
+        }
+
+        if (tab_state.match_count > 1)
+        {
+            tab_state.active = 1;
+            return;
+        }
+    }
+
+    while (input.e > input.w)
+    {
+        input.e--;
+        consputc(BACKSPACE);
+    }
+    input.c = input.w;
+
+    const char *next_match = tab_state.matches[tab_state.match_index];
+    int next_len = strlen(next_match);
+
+    for (int i = 0; i < next_len; i++)
+    {
+        input.buf[input.e++ % INPUT_BUF] = next_match[i];
+        consputc(next_match[i]);
+    }
+    input.c = input.e;
+
+    safestrcpy(tab_state.last_prefix, next_match, INPUT_BUF);
+
+    tab_state.match_index = (tab_state.match_index + 1) % tab_state.match_count;
+}
 
 static int
 is_whitespace(char c)
@@ -258,16 +361,12 @@ is_whitespace(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\v';
 }
 
-// NEW: Helper to highlight or un-highlight text on screen
-// NEW: Helper to highlight or un-highlight text on screen
 static void
 update_highlight(int start, int end, int on)
 {
-    // Validate indices and ensure start < end
     if (start < 0 || end <= start)
         return;
 
-    // Clamp to visible buffer region
     if (start < (int)input.w)
         start = input.w;
     if (end > (int)input.e)
@@ -275,15 +374,10 @@ update_highlight(int start, int end, int on)
     if (start >= end)
         return;
 
-    // Compute screen position of input.w (start of displayed buffer)
-    // cursor_pos corresponds to input.c; so screen_pos_of_w = cursor - (input.c - input.w)
     int cursor_pos = cga_get_cursor_pos();
     int screen_pos_of_w = cursor_pos - (int)(input.c - input.w);
 
-    // Attributes:
-    // normal attribute (text drawn by consputc uses 0x0700 in this file)
     ushort normal_attr = 0x0700;
-    // highlight: invert background/foreground - choose 0x7000 (0x70 in high byte)
     ushort highlight_attr = 0x7000;
 
     for (int i = start; i < end; i++)
@@ -291,21 +385,18 @@ update_highlight(int start, int end, int on)
         int screen_pos = screen_pos_of_w + (i - (int)input.w);
         if (screen_pos >= 0 && screen_pos < 25 * 80)
         {
-            ushort ch = crt[screen_pos] & 0x00ff; // keep character
+            ushort ch = crt[screen_pos] & 0x00ff;
             crt[screen_pos] = ch | (on ? highlight_attr : normal_attr);
         }
     }
 }
 
-// Delete the current selection and redraw the input line correctly.
-// Also record deletions into undo (best-effort, up to UNDO_BUF).
 static void
 delete_selection(void)
 {
     if (input.sel_start == -1 || input.sel_end == -1)
         return;
 
-    // Make sure start < end
     int s = input.sel_start;
     int e = input.sel_end;
     if (s > e)
@@ -315,7 +406,6 @@ delete_selection(void)
         e = t;
     }
 
-    // Clamp to current buffer region
     if (s < (int)input.w)
         s = input.w;
     if (e > (int)input.e)
@@ -328,9 +418,8 @@ delete_selection(void)
 
     int len = e - s;
     int old_e = input.e;
-    int old_c = input.c; // hardware cursor corresponds to this logical cursor
+    int old_c = input.c;
 
-    // Record deleted chars into undo (so Ctrl+Z can restore). This is optional.
     for (int k = 0; k < len && undo.n < UNDO_BUF; k++)
     {
         undo.buf[undo.n].type = OP_DELETE;
@@ -339,47 +428,39 @@ delete_selection(void)
         undo.n++;
     }
 
-    // Compute screen start position for input.w based on the *old* cursor mapping.
-    // screen_pos_of_w = hw_cursor - (old_c - input.w)
     int hw_cursor = cga_get_cursor_pos();
     int screen_pos_of_w = hw_cursor - (old_c - (int)input.w);
 
-    // Safety clamp for screen_pos_of_w
     if (screen_pos_of_w < 0)
         screen_pos_of_w = 0;
     if (screen_pos_of_w >= 25 * 80)
         screen_pos_of_w = 25 * 80 - 1;
 
-    // Shift buffer left to delete selected text
     for (int i = e; i < old_e; i++)
         input.buf[(i - len) % INPUT_BUF] = input.buf[i % INPUT_BUF];
 
     input.e -= len;
     input.c = s;
 
-    // Redraw the visible line from input.w .. input.e
     cga_set_cursor_pos(screen_pos_of_w);
     for (int i = input.w; i < input.e; i++)
         consputc(input.buf[i % INPUT_BUF]);
 
-    // Clear leftover characters that remain from old_e
     int leftover = old_e - input.e;
     for (int i = 0; i < leftover; i++)
         consputc(' ');
 
-    // Restore logical cursor to input.c
     cga_set_cursor_pos(screen_pos_of_w + (input.c - input.w));
 
     clear_selection();
 }
 
-// NEW: Clears any active selection
 static void
 clear_selection(void)
 {
     if (input.sel_start != -1)
     {
-        update_highlight(input.sel_start, input.sel_end, 0); // Turn off highlight
+        update_highlight(input.sel_start, input.sel_end, 0);
         input.sel_start = -1;
         input.sel_end = -1;
     }
@@ -403,37 +484,29 @@ void consoleintr(int (*getc)(void))
     {
         switch (c)
         {
-        case '\t':
-            if (input.e - input.r < INPUT_BUF)
-            {
-                input.buf[input.e++ % INPUT_BUF] = c;
-                input.w = input.e;
-                wakeup(&input.r);
-            }
+        case '\t': // NEW: Tab Completion Logic
+            deselect_if_any();
+            handle_tab_completion(); // Call the new handler
             break;
-        case C('S'): // NEW: Select text
+        case C('S'):
             if (input.selecting == 0)
             {
-                // First Ctrl+S: Start selection
-                clear_selection(); // Clear any previous selection
+                clear_selection();
                 input.selecting = 1;
                 input.sel_start = input.c;
                 input.sel_end = -1;
             }
             else
             {
-                // Second Ctrl+S: End selection
                 input.selecting = 0;
                 input.sel_end = input.c;
 
-                // Ensure start is always before end
                 if (input.sel_start > input.sel_end)
                 {
                     int tmp = input.sel_start;
                     input.sel_start = input.sel_end;
                     input.sel_end = tmp;
                 }
-                // If start and end are the same, it's not a valid selection
                 if (input.sel_start == input.sel_end)
                 {
                     input.sel_start = -1;
@@ -441,11 +514,11 @@ void consoleintr(int (*getc)(void))
                 }
                 else
                 {
-                    update_highlight(input.sel_start, input.sel_end, 1); // Turn on highlight
+                    update_highlight(input.sel_start, input.sel_end, 1);
                 }
             }
             break;
-        case C('C'): // copy
+        case C('C'):
             if (input.sel_start != -1 && input.sel_end != -1)
             {
                 int s = input.sel_start, e = input.sel_end;
@@ -468,14 +541,12 @@ void consoleintr(int (*getc)(void))
             }
             else
             {
-                // no selection — just clear any selection artifact
                 clear_selection();
-                clipboard.n = 0; // optionally clear clipboard if you prefer
+                clipboard.n = 0;
             }
             break;
 
-        case C('V'): // Paste clipboard content
-
+        case C('V'):
             if (clipboard.n > 0)
             {
                 if (input.sel_start != -1 && input.sel_end != -1)
@@ -486,26 +557,22 @@ void consoleintr(int (*getc)(void))
                 {
                     int ch = clipboard.buf[i];
 
-                    // Use same insertion logic as default typing
                     if (input.e < input.r + INPUT_BUF)
                     {
-                        // Log insertion for undo
                         if (undo.n < UNDO_BUF)
                         {
                             undo.buf[undo.n].type = OP_INSERT;
-                            undo.buf[undo.n].pos = input.c; // position where char will be inserted
-                            undo.buf[undo.n].c = ch;        // store the inserted character
+                            undo.buf[undo.n].pos = input.c;
+                            undo.buf[undo.n].c = ch;
                             undo.n++;
                         }
 
-                        // Insert character
                         for (int j = input.e; j > input.c; j--)
                             input.buf[j % INPUT_BUF] = input.buf[(j - 1) % INPUT_BUF];
                         input.buf[input.c % INPUT_BUF] = ch;
                         input.e++;
                         input.c++;
 
-                        // Redraw everything from current cursor
                         for (int j = input.c - 1; j < input.e; j++)
                             consputc(input.buf[j % INPUT_BUF]);
                         cga_set_cursor_pos(cga_get_cursor_pos() - (input.e - input.c));
@@ -513,12 +580,11 @@ void consoleintr(int (*getc)(void))
                 }
             }
 
-            // After pasting, clear any selection
             deselect_if_any();
             clear_selection();
             break;
 
-        case C('A'): // NEW: Backward-word
+        case C('A'):
             deselect_if_any();
             if (input.c > input.w)
             {
@@ -533,17 +599,17 @@ void consoleintr(int (*getc)(void))
                 cga_set_cursor_pos(cga_get_cursor_pos() - (old_c - input.c));
             }
             break;
-        case C('D'): // NEW: Forward-word or EOF
+        case C('D'):
             deselect_if_any();
             if (input.e == input.w)
-            { // Empty line -> EOF
+            {
                 input.buf[input.e++ % INPUT_BUF] = C('D');
                 input.w = input.e;
                 input.c = input.w;
                 wakeup(&input.r);
             }
             else if (input.c < input.e)
-            { // Line has text -> move forward
+            {
                 int old_c = input.c;
                 int temp_c = input.c;
                 while (temp_c < input.e && !is_whitespace(input.buf[temp_c % INPUT_BUF]))
@@ -557,22 +623,19 @@ void consoleintr(int (*getc)(void))
                 }
             }
             break;
-        case C('P'): // Process listing.
+        case C('P'):
             deselect_if_any();
-            // procdump() locks cons.lock indirectly; invoke later
             doprocdump = 1;
             break;
-        case C('U'): // Kill line (Ctrl+U)
+        case C('U'):
             deselect_if_any();
             if (input.e != input.w)
             {
-                // Move cursor to end of line for consistent backspacing
                 int curpos = cga_get_cursor_pos();
                 int move_right = (input.e - input.c);
                 cga_set_cursor_pos(curpos + move_right);
                 input.c = input.e;
 
-                // Erase all characters on screen
                 while (input.e != input.w)
                 {
                     input.e--;
@@ -580,27 +643,23 @@ void consoleintr(int (*getc)(void))
                     consputc(BACKSPACE);
                 }
 
-                // Reset cursor and input buffer indexes
                 input.c = input.w;
-                undo.n = 0; // clear undo history
+                undo.n = 0;
             }
             break;
             input.c = input.w;
-            undo.n = 0; // NEW: Clear undo history
+            undo.n = 0;
             break;
         case C('H'):
-        case '\x7f': // Backspace
-            // If there's an active selection, delete it entirely
+        case '\x7f':
             if (input.sel_start != -1 && input.sel_end != -1)
             {
                 delete_selection();
                 break;
             }
 
-            // No selection -> normal single-character backspace
             if (input.c > input.w)
             {
-                // Log deletion for undo
                 if (undo.n < UNDO_BUF)
                 {
                     undo.buf[undo.n].type = OP_DELETE;
@@ -609,31 +668,25 @@ void consoleintr(int (*getc)(void))
                     undo.n++;
                 }
 
-                // Compute the screen position of the start of the visible input region
-                // cursor_pos currently corresponds to input.c (character position after cursor)
                 int cursor_pos = cga_get_cursor_pos();
                 int line_start_pos = cursor_pos - (int)(input.c - input.w);
 
-                // Shift buffer left to remove the character at input.c-1
                 for (int i = input.c; i < (int)input.e; i++)
                     input.buf[(i - 1) % INPUT_BUF] = input.buf[i % INPUT_BUF];
 
                 input.c--;
                 input.e--;
 
-                // Redraw the visible input region cleanly from line_start_pos
                 cga_set_cursor_pos(line_start_pos);
                 for (int i = input.w; i < (int)input.e; i++)
                     consputc(input.buf[i % INPUT_BUF]);
 
-                // Clear leftover char at end (in case new line shorter than old)
                 consputc(' ');
 
-                // Restore hardware cursor to logical cursor position
                 cga_set_cursor_pos(line_start_pos + (input.c - input.w));
             }
             break;
-        case C('Z'): // Undo last operation
+        case C('Z'):
             deselect_if_any();
             if (undo.n > 0)
             {
@@ -642,50 +695,23 @@ void consoleintr(int (*getc)(void))
 
                 if (last.type == OP_INSERT)
                 {
-                    // Undo an insertion → remove the inserted char at its original position.
                     if (pos < input.w || pos >= input.e)
                         break;
 
-                    // Shift buffer left
                     for (int i = pos + 1; i < input.e; i++)
                         input.buf[(i - 1) % INPUT_BUF] = input.buf[i % INPUT_BUF];
                     input.e--;
 
-                    // Redraw everything from 'pos'
                     int cursor_before = cga_get_cursor_pos();
                     int delta = input.c - pos;
                     cga_set_cursor_pos(cursor_before - delta);
                     for (int i = pos; i < input.e; i++)
                         consputc(input.buf[i % INPUT_BUF]);
-                    consputc(' '); // erase leftover char
+                    consputc(' ');
                     cga_set_cursor_pos(cga_get_cursor_pos() - (input.e - pos + 1));
 
-                    // Restore logical cursor
                     input.c = pos;
                 }
-                // else if (last.type == OP_DELETE)
-                // {
-                //     // Undo a deletion → reinsert the deleted char at its original position.
-                //     if (pos < input.w || pos > input.e)
-                //         break;
-
-                //     // Shift buffer right
-                //     for (int i = input.e; i > pos; i--)
-                //         input.buf[i % INPUT_BUF] = input.buf[(i - 1) % INPUT_BUF];
-                //     input.buf[pos % INPUT_BUF] = last.c;
-                //     input.e++;
-
-                //     // Redraw from 'pos'
-                //     int cursor_before = cga_get_cursor_pos();
-                //     int delta = input.c - pos;
-                //     cga_set_cursor_pos(cursor_before - delta);
-                //     for (int i = pos; i < input.e; i++)
-                //         consputc(input.buf[i % INPUT_BUF]);
-                //     cga_set_cursor_pos(cga_get_cursor_pos() - (input.e - pos - 1));
-
-                //     // Restore logical cursor
-                //     input.c = pos + 1;
-                // }
             }
             break;
 
@@ -708,60 +734,49 @@ void consoleintr(int (*getc)(void))
         default:
             if (c != 0)
             {
-                // Convert CR to LF
                 if (c == '\r')
                     c = '\n';
 
-                // If there's an active selection, replace it by removing the selection first.
                 if (input.sel_start != -1 && input.sel_end != -1)
                 {
-                    // delete_selection() will clear the selection and redraw
                     delete_selection();
                 }
 
-                // If it's newline or buffer full -> finish the line and wake reader
                 if (c == '\n' || input.e == input.r + INPUT_BUF)
                 {
                     if (c == '\n')
-                        cgaputc('\n'); // move hardware cursor to next line
+                        cgaputc('\n');
                     input.buf[input.e++ % INPUT_BUF] = '\n';
                     input.w = input.e;
                     input.c = input.w;
-                    undo.n = 0;       // reset undo history on submit
-                    wakeup(&input.r); // let readers see the line
+                    undo.n = 0;
+                    wakeup(&input.r);
                 }
                 else
                 {
-                    // Normal character insertion
                     if (input.e < input.r + INPUT_BUF)
                     {
-                        // Log insertion for undo
                         if (undo.n < UNDO_BUF)
                         {
                             undo.buf[undo.n].type = OP_INSERT;
-                            undo.buf[undo.n].pos = input.c; // position where char will be inserted
-                            undo.buf[undo.n].c = c;         // store the inserted character
+                            undo.buf[undo.n].pos = input.c;
+                            undo.buf[undo.n].c = c;
                             undo.n++;
                         }
 
-                        // Shift characters right to make room
                         for (int i = input.e; i > (int)input.c; i--)
                             input.buf[i % INPUT_BUF] = input.buf[(i - 1) % INPUT_BUF];
 
-                        // Place char at cursor
                         input.buf[input.c % INPUT_BUF] = c;
                         input.e++;
                         input.c++;
 
-                        // Redraw from the inserted char up to the end of the line
                         for (int i = input.c - 1; i < (int)input.e; i++)
                             consputc(input.buf[i % INPUT_BUF]);
 
-                        // Move hardware cursor back so it matches logical cursor
                         cga_set_cursor_pos(cga_get_cursor_pos() - (input.e - input.c));
                     }
                 }
-                // ensure we clear any selection state after handling input char
                 clear_selection();
             }
             break;
@@ -796,11 +811,9 @@ int consoleread(struct inode *ip, char *dst, int n)
         }
         c = input.buf[input.r++ % INPUT_BUF];
         if (c == C('D'))
-        { // EOF
+        {
             if (n < target)
             {
-                // Save ^D for next time, to make sure
-                // caller gets a 0-byte result.
                 input.r--;
             }
             break;
@@ -839,7 +852,8 @@ void consoleinit(void)
     cons.locking = 1;
 
     input.r = input.w = input.e = input.c = 0;
-    undo.n = 0; // NEW: Initialize undo buffer
+    undo.n = 0;
+    reset_tab_state();
 
     ioapicenable(IRQ_KBD, 0);
 }
