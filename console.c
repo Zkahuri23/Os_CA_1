@@ -243,11 +243,7 @@ static int num_commands = sizeof(commands) / sizeof(commands[0]);
 
 static struct
 {
-    char last_prefix[INPUT_BUF];
-    int match_count;
-    const char *matches[sizeof(commands) / sizeof(commands[0])];
-    int match_index;
-    int active;
+    int last_key_was_tab;
 } tab_state;
 
 #define C(x) ((x) - '@')
@@ -255,10 +251,74 @@ static struct
 static void
 reset_tab_state(void)
 {
-    tab_state.active = 0;
-    tab_state.match_index = 0;
-    tab_state.match_count = 0;
-    tab_state.last_prefix[0] = '\0';
+    tab_state.last_key_was_tab = 0;
+}
+
+static int
+find_lcp_len(const char *matches[], int count)
+{
+    if (count <= 0)
+        return 0;
+    if (count == 1)
+        return strlen(matches[0]);
+
+    int lcp_len = 0;
+    const char *first = matches[0];
+
+    while (1)
+    {
+        char c = first[lcp_len];
+        if (c == '\0')
+            break;
+
+        for (int i = 1; i < count; i++)
+        {
+            if (matches[i][lcp_len] != c)
+            {
+                return lcp_len;
+            }
+        }
+        lcp_len++;
+    }
+    return lcp_len;
+}
+
+static void
+print_matches_and_redraw(const char *matches[], int count)
+{
+    int original_locking = cons.locking;
+    cons.locking = 0;
+
+    cprintf("\n");
+
+    for (int i = 0; i < count; i++)
+    {
+        cprintf("%s  ", matches[i]);
+    }
+
+    cprintf("\n");
+
+    cprintf("$ ");
+
+    if (input.e != input.w)
+    {
+        int curpos = cga_get_cursor_pos();
+        int move_right = (input.e - input.c);
+        cga_set_cursor_pos(curpos + move_right);
+        input.c = input.e;
+
+        while (input.e != input.w)
+        {
+            input.e--;
+            input.c--;
+            consputc(BACKSPACE);
+        }
+    }
+    cprintf(" ");
+    input.c = input.w;
+    undo.n = 0;
+
+    cons.locking = original_locking;
 }
 
 static void
@@ -276,7 +336,7 @@ handle_tab_completion(void)
             break;
         }
     }
-    if (!is_first_word || len >= INPUT_BUF)
+    if (!is_first_word || len < 0 || len >= INPUT_BUF)
     {
         reset_tab_state();
         return;
@@ -285,74 +345,60 @@ handle_tab_completion(void)
     memmove(prefix, input.buf + (input.w % INPUT_BUF), len);
     prefix[len] = '\0';
 
-    if (!tab_state.active || strncmp(prefix, tab_state.last_prefix, INPUT_BUF) != 0)
+    const char *matches[sizeof(commands) / sizeof(commands[0])];
+    int match_count = 0;
+    for (int i = 0; i < num_commands; i++)
+    {
+        if (strncmp(prefix, commands[i], len) == 0)
+        {
+            matches[match_count++] = commands[i];
+        }
+    }
+
+    if (match_count == 0)
     {
         reset_tab_state();
-        safestrcpy(tab_state.last_prefix, prefix, INPUT_BUF);
+        return;
+    }
 
-        for (int i = 0; i < num_commands; i++)
+    if (match_count == 1)
+    {
+        const char *completion = matches[0];
+        int comp_len = strlen(completion);
+
+        for (int i = len; i < comp_len; i++)
         {
-            if (len == 0 || strncmp(prefix, commands[i], len) == 0)
-            {
-                tab_state.matches[tab_state.match_count++] = commands[i];
-            }
+            if (input.e >= input.r + INPUT_BUF)
+                break;
+            input.buf[input.e++ % INPUT_BUF] = completion[i];
+            consputc(completion[i]);
         }
+        input.c = input.e;
+        reset_tab_state();
+        return;
+    }
 
-        if (tab_state.match_count == 0)
+    if (tab_state.last_key_was_tab)
+    {
+        print_matches_and_redraw(matches, match_count);
+        reset_tab_state();
+    }
+    else
+    {
+        int lcp_len = find_lcp_len(matches, match_count);
+        if (lcp_len > len)
         {
-            reset_tab_state();
-            return;
-        }
-
-        if (tab_state.match_count == 1)
-        {
-            const char *completion = tab_state.matches[0];
-            int comp_len = strlen(completion);
-
-            while (input.e > input.w)
+            for (int i = len; i < lcp_len; i++)
             {
-                input.e--;
-                consputc(BACKSPACE);
-            }
-            input.c = input.w;
-
-            for (int i = 0; i < comp_len; i++)
-            {
-                input.buf[input.e++ % INPUT_BUF] = completion[i];
-                consputc(completion[i]);
+                if (input.e >= input.r + INPUT_BUF)
+                    break;
+                input.buf[input.e++ % INPUT_BUF] = matches[0][i];
+                consputc(matches[0][i]);
             }
             input.c = input.e;
-            reset_tab_state();
-            return;
         }
-
-        if (tab_state.match_count > 1)
-        {
-            tab_state.active = 1;
-            return;
-        }
+        tab_state.last_key_was_tab = 1;
     }
-
-    while (input.e > input.w)
-    {
-        input.e--;
-        consputc(BACKSPACE);
-    }
-    input.c = input.w;
-
-    const char *next_match = tab_state.matches[tab_state.match_index];
-    int next_len = strlen(next_match);
-
-    for (int i = 0; i < next_len; i++)
-    {
-        input.buf[input.e++ % INPUT_BUF] = next_match[i];
-        consputc(next_match[i]);
-    }
-    input.c = input.e;
-
-    safestrcpy(tab_state.last_prefix, next_match, INPUT_BUF);
-
-    tab_state.match_index = (tab_state.match_index + 1) % tab_state.match_count;
 }
 
 static int
@@ -484,9 +530,9 @@ void consoleintr(int (*getc)(void))
     {
         switch (c)
         {
-        case '\t': // NEW: Tab Completion Logic
+        case '\t':
             deselect_if_any();
-            handle_tab_completion(); // Call the new handler
+            handle_tab_completion();
             break;
         case C('S'):
             if (input.selecting == 0)
@@ -646,7 +692,6 @@ void consoleintr(int (*getc)(void))
                 input.c = input.w;
                 undo.n = 0;
             }
-            break;
             input.c = input.w;
             undo.n = 0;
             break;
