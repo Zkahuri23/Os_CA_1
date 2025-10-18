@@ -7,7 +7,6 @@ int is_digit(char c) {
     return c >= '0' && c <= '9';
 }
 
-// تابعی برای معکوس کردن یک رشته
 void reverse(char *str, int length) {
     int start = 0;
     int end = length - 1;
@@ -20,7 +19,6 @@ void reverse(char *str, int length) {
     }
 }
 
-// تابعی برای تبدیل عدد صحیح به رشته
 int itoa(long long num, char *str) {
     int i = 0;
     if (num == 0) {
@@ -47,7 +45,7 @@ int main(int argc, char *argv[]) {
         exit();
     }
 
-    long long total_sum = 0; // استفاده از long long برای مقادیر بزرگ
+    long long total_sum = 0;
     for (int j = 1; j < argc; j++) {
         char *input_str = argv[j];
         int i = 0;
